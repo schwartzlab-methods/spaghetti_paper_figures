@@ -177,6 +177,7 @@ def segmentation(data_loader, convertion, model_name: list[str], do_convert: lis
     seg_result_nonbinary = []
     seg_result_binary = []
     img_L = []
+    extra_pixels_L = []
     model_type = ["cellpose" if name in model_dict["cellpose"] else "stardist" for name in model_name]
     model_L = [build_segment_model(name=m_name, model_type=m_type) for m_name, m_type in zip(model_name, model_type)]
     for idx, (img, label) in enumerate(tqdm(data_loader)):
@@ -212,6 +213,7 @@ def segmentation(data_loader, convertion, model_name: list[str], do_convert: lis
         # track some results
         temp_img_L = []
         temp_dice = []
+        temp_extra_pixels = []
         temp_seg_result_nonbinary = [img_np, coco_masks]
         temp_seg_result_binary = [img_np, binary_coco_masks]
         # start the segmentation
@@ -245,16 +247,21 @@ def segmentation(data_loader, convertion, model_name: list[str], do_convert: lis
             # compute dice
             dice = compute_dice_score(binary_pred_masks, binary_coco_masks)
             print("The dice score is: ", dice)
+            # compute extra pixels the the predicted mask has to estimate over-segmentation
+            extra_pixels = np.sum((binary_pred_masks == 1) & (binary_coco_masks == 0))
+
             # append to list
             temp_dice.append(dice)
             temp_seg_result_binary.append(binary_pred_masks)
             temp_seg_result_nonbinary.append(pred_masks)
+            temp_extra_pixels.append(extra_pixels)
             temp_img_L.append(img_final)
         dice_L.append(temp_dice)
         seg_result_nonbinary.append(temp_seg_result_nonbinary)
         seg_result_binary.append(temp_seg_result_binary)
         img_L.append(temp_img_L)
-    return dice_L, seg_result_nonbinary, seg_result_binary, img_L
+        extra_pixels_L.append(temp_extra_pixels)
+    return dice_L, seg_result_nonbinary, seg_result_binary, img_L, extra_pixels_L
 
 def segmentation_wang(data_loader, convertion, model_name: list[str], do_convert: list[bool],
                  do_invert: list[bool]):

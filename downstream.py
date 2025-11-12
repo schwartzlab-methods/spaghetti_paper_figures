@@ -203,7 +203,7 @@ def main():
         assert len(args.segmentation_model) == len(args.do_convert), "Number of models and conversions mismatch"
         if args.coco:
             coco_L = [COCO(coco) for coco in args.coco]
-            dice_L, seg_result_nonbinary, seg_result_binary, img_L = dm.segmentation(total_loader, convert_to_HE, args.segmentation_model, 
+            dice_L, seg_result_nonbinary, seg_result_binary, img_L, extra_pixels_L = dm.segmentation(total_loader, convert_to_HE, args.segmentation_model, 
                                                                             do_convert=args.do_convert, do_invert=args.do_invert, do_crop=args.crop, coco=coco_L,
                                                                             utom=args.utom)
         elif args.masks:
@@ -211,10 +211,10 @@ def main():
             for mask_dir in args.masks:
                 masks = [os.path.join(mask_dir, x) for x in os.listdir(mask_dir)]
                 masks_L.extend(masks)
-            dice_L, seg_result_nonbinary, seg_result_binary, img_L = dm.segmentation(total_loader, convert_to_HE, args.segmentation_model, 
+            dice_L, seg_result_nonbinary, seg_result_binary, img_L, extra_pixels_L = dm.segmentation(total_loader, convert_to_HE, args.segmentation_model, 
                                                                             do_convert=args.do_convert, do_invert=args.do_invert, do_crop=args.crop, masks=masks_L)
         elif args.wang_data:
-            dice_L, seg_result_binary, img_L = dm.segmentation_wang(total_loader, convert_to_HE, args.segmentation_model,
+            dice_L, seg_result_binary, img_L, extra_pixels_L = dm.segmentation_wang(total_loader, convert_to_HE, args.segmentation_model,
                                                                     do_convert=args.do_convert, do_invert=args.do_invert)
         else:
             raise ValueError("No masks provided for ground truth of segmentation")
@@ -222,6 +222,9 @@ def main():
         for idx, segmentation_model in enumerate(args.segmentation_model):
             with open(os.path.join(args.save_dir, f"dice_{segmentation_model}_{args.name}_{str(args.do_convert[idx])}.txt"), 'w') as f:
                 for item in dice_L:
+                    f.write("%s\n" % item[idx])
+            with open(os.path.join(args.save_dir, f"extra_pixels_{segmentation_model}_{args.name}_{str(args.do_convert[idx])}.txt"), 'w') as f:
+                for item in extra_pixels_L:
                     f.write("%s\n" % item[idx])
         # plot masks
         plot_masks(seg_result_binary, img_L, os.path.join(args.save_dir, "background_seg"), args.name)
