@@ -20,7 +20,7 @@ livecell/
     ...
 ```
 
-In addition, please also download the cell viability dataset, which can be used as is downloaded from https://figshare.com/articles/dataset/VirtualStaining_Dataset/21971558/1?file=38982755
+In addition, please also download the cell viability dataset, which can be used as is. You can download it from https://figshare.com/articles/dataset/VirtualStaining_Dataset/21971558/1?file=38982755
 
 ## Running Scripts
-All scripts are located at `script_to_figures/`. Before running the scripts, since there will be a lot of outputs and inputs being generated, **make sure you go to each bash script file and change the path to the corresponding inputs and outputs based on the comments in the bash script**.
+All scripts are located at `script_for_figures/`. Before running the scripts, since there will be a lot of outputs and inputs being generated, **make sure you go to each bash script file and change the path to the corresponding inputs and outputs based on the comments in the bash script**. Please also read the argument for each `.py` files to be run to understand what argument is required.
