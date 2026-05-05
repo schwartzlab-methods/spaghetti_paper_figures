@@ -1,6 +1,9 @@
 # SPAGHETTI Figures
 This repository contains the code to reproduce the plots used in the SPAGHETTI paper.
+
 The main SPAGHETTI program can be found at: https://github.com/schwartzlab-methods/spaghetti 
+
+Read the paper at: https://www.biorxiv.org/content/10.1101/2025.08.27.672636v1.abstract
 
 ## Downloading and Pre-processing Data
 Please first download the datasets used to train and validate the model:
