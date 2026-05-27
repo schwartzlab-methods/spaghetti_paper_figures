@@ -5,10 +5,95 @@ Generate pink filter images from the original images in a given directory.
 import os
 import torch
 import torchvision.transforms.v2 as v2
+import matplotlib.pyplot as plt
 from torch import nn
-from utils.dataset import CustomImageDataset as datset
+from utils.dataset import CustomImageDataset as data
 import argparse
 from tqdm import tqdm
+import pytorch_lightning as pl
+from PIL import PngImagePlugin
+LARGE_ENOUGH_NUMBER = 100
+PngImagePlugin.MAX_TEXT_CHUNK = LARGE_ENOUGH_NUMBER * (1024**2)
+
+import torch
+import torch.nn.functional as F
+import numpy as np
+import cv2
+
+class MultiLayerGeneratorGradCAM:
+    def __init__(self, model, target_layers_dict):
+        """
+        model: Your SPAGHETTI generator.
+        target_layers_dict: A dictionary mapping your chosen names to the actual PyTorch modules.
+                            e.g., {'block_1': model.res1, 'block_5': model.res5}
+        """
+        self.model = model
+        self.target_layers_dict = target_layers_dict
+        self.feature_maps = {}
+        self.gradients = {}
+        
+        # Register hooks for every layer passed in the dictionary
+        for name, layer in self.target_layers_dict.items():
+            layer.register_forward_hook(self._save_feature_maps(name))
+            layer.register_full_backward_hook(self._save_gradients(name))
+            
+    def _save_feature_maps(self, name):
+        # Closure to capture the layer name
+        def hook(module, input, output):
+            self.feature_maps[name] = output
+        return hook
+        
+    def _save_gradients(self, name):
+        # Closure to capture the layer name
+        def hook(module, grad_in, grad_out):
+            self.gradients[name] = grad_out[0]
+        return hook
+        
+    def generate_heatmaps(self, input_pcm_image, target_channel=None, roi_mask=None):
+        self.model.eval()
+        self.model.zero_grad()
+        
+        # 1. Forward Pass
+        input_pcm_image.requires_grad_(True)
+        generated_H_E = self.model(input_pcm_image)
+        
+        # 2. Define the Scalar Target (e.g., Blue/Hematoxylin channel)
+        if roi_mask is not None:
+            loss = (generated_H_E * roi_mask).sum()
+        elif target_channel is not None:
+            loss = generated_H_E[:, target_channel, :, :].sum()
+        else:
+            loss = generated_H_E.sum()
+            
+        # 3. Backward Pass (Populates self.gradients for all hooked layers)
+        loss.backward()
+        
+        heatmaps = {}
+        
+        # 4. Compute Grad-CAM for each hooked layer
+        for name in self.target_layers_dict.keys():
+            gradients = self.gradients[name]
+            features = self.feature_maps[name]
+            
+            # Global Average Pooling of gradients
+            weights = torch.mean(gradients, dim=[2, 3], keepdim=True)
+            
+            # Multiply features by weights
+            cam = torch.sum(weights * features, dim=1, keepdim=True)
+            
+            # ReLU (Only keep features with positive influence)
+            cam = F.relu(cam)
+            
+            # Upsample to match original image
+            cam = F.interpolate(cam, size=input_pcm_image.shape[2:], mode='bilinear', align_corners=False)
+            
+            # Normalize
+            cam = cam - cam.min()
+            cam = cam / (cam.max() + 1e-8)
+            
+            heatmaps[name] = cam.squeeze().detach().cpu().numpy()
+            
+        return heatmaps, generated_H_E.detach()
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels):
@@ -106,46 +191,128 @@ def init_spaghetti(model_path: str) -> torch.nn.Module:
     generator.load_state_dict(ckpt)
     return generator
 
-def pink_filter_images(input_dir, output_dir, do_crop, model_path):
-    # Create the output directory if it does not exist
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+def init_spaghetti_reverse(model_path: str) -> torch.nn.Module:
+    '''
+    Initialize the SPAGHETTI model for image translation in the reverse direction
+    '''
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    generator = SpaghettiGenerator(3, 9)
+    generator.to(device)
+    ckpt = torch.load(model_path, map_location=device)["state_dict"]
+    # get only G_BA weights
+    ckpt = {k[5:]: v for k, v in ckpt.items() if ("G_BA" in k)}
+    generator.load_state_dict(ckpt)
+    return generator
 
+def pink_filter_images(input_dir, output_dir, do_crop, model_path):
+    os.makedirs(output_dir, exist_ok=True)
+
+    # seed
+    torch.manual_seed(42)
+    pl.seed_everything(42)
     # Load the images from the input directory
-    dataset = datset(input_dir, transform=None)
+    dataset = data(input_dir, transform=None)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 
     # Load the pre-trained model
     spaghetti_model = init_spaghetti(model_path)
     spaghetti_model.eval()
+    spaghetti_reconstructor = init_spaghetti_reverse(model_path)
+    spaghetti_reconstructor.eval()
 
-    with torch.no_grad():
-        # Apply the pink filter to each image and save the result in the output directory
-        for i, (image, _) in enumerate(tqdm(dataloader)):
-            if do_crop:
-                crop = v2.RandomCrop((256,256))
-                image = crop(image)
-            # back to original size
-            resize = v2.Resize((256,256))
-            image = resize(image)
-            pink_purple_color = torch.tensor([1.0, 182/255.0, 193/255.0]).view(3, 1, 1)
-            # Apply the pink filter
-            pink_image = 0.9 * image + 0.1 * pink_purple_color
-            pink_image = torch.clamp(pink_image, 0, 1)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    spaghetti_model.to(device)
+    spaghetti_reconstructor.to(device)
 
-            # Save the pink filter image
-            output_path = os.path.join(output_dir, f"pink_image_{i}.png")
-            v2.ToPILImage()(pink_image.squeeze(0)).save(output_path)
+    layers_to_inspect = {
+        'ResBlock_1': spaghetti_model.trans[0],
+        'ResBlock_3': spaghetti_model.trans[2],
+        'ResBlock_6': spaghetti_model.trans[5],
+        'ResBlock_9': spaghetti_model.trans[8]
+    }
 
-            # save the original image for comparison
-            original_output_path = os.path.join(output_dir, f"original_image_{i}.png")
-            v2.ToPILImage()(image.squeeze(0)).save(original_output_path)
+    cam_extractor = MultiLayerGeneratorGradCAM(spaghetti_model, layers_to_inspect)
 
-            # Apply the spaghetti model to generate the spaghetti image
-            invert = v2.RandomInvert(p=1.0)
-            spaghetti_image = spaghetti_model(invert(pink_image))
-            spaghetti_output_path = os.path.join(output_dir, f"spaghetti_image_{i}.png")
-            v2.ToPILImage()(spaghetti_image.squeeze(0)).save(spaghetti_output_path)
+    # with torch.no_grad():
+    # Apply the pink filter to each image and save the result in the output directory
+    for i, (image, labels) in enumerate(tqdm(dataloader)):
+        image = image.to(device)
+        f_name = labels[2][0].split("/")[-1].split(".")[0]
+        if do_crop:
+            # crop = v2.RandomCrop((256,256))
+            crop = v2.RandomCrop((64,64))
+            image = crop(image)
+        # back to original size
+        resize = v2.Resize((256,256))
+        image = resize(image)
+        pink_purple_color = torch.tensor([1.0, 182/255.0, 193/255.0]).view(3, 1, 1).to(device)
+        # Apply the pink filter
+        pink_image = 0.9 * image + 0.1 * pink_purple_color
+        pink_image = torch.clamp(pink_image, 0, 1)
+
+        # Apply the spaghetti model to generate the spaghetti image
+        # invert = v2.RandomInvert(p=1.0)
+        # image = invert(image)
+        spaghetti_image = spaghetti_model(image)
+        recon = spaghetti_reconstructor(spaghetti_image)
+        #! Generate heatmaps (Targeting channel 2: Hematoxylin/Blue) for grad cam
+        # input_pcm should be a tensor [1, C, H, W]
+        heatmaps_dict, generated_img = cam_extractor.generate_heatmaps(image, target_channel=2)
+        fig, axes = plt.subplots(1, len(heatmaps_dict) + 2, figsize=(20, 5))
+
+        # Original Phase Contrast
+        pcm_img_np = image.squeeze().detach().cpu().numpy()
+        pcm_img_np = np.transpose(pcm_img_np, (1, 2, 0)) # Convert to HWC for plotting
+        axes[0].imshow(pcm_img_np, cmap='gray' if pcm_img_np.shape[-1] == 1 else None)
+        axes[0].set_title("Input PCM")
+        axes[0].axis('off')
+
+        # Plot each heatmap overlaid on the original image
+        for idx, (layer_name, heatmap) in enumerate(heatmaps_dict.items()):
+            ax = axes[idx + 1]
+            
+            # Optional: Convert to JET color map for overlay
+            heatmap_color = cv2.applyColorMap(np.uint8(255 * heatmap), cv2.COLORMAP_JET)
+            heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
+            
+            # Ensure PCM is RGB for blending
+            if pcm_img_np.shape[-1] == 1: 
+                pcm_rgb = cv2.cvtColor(np.uint8(255 * pcm_img_np), cv2.COLOR_GRAY2RGB)
+            else:
+                pcm_rgb = np.uint8(255 * pcm_img_np)
+                
+            overlay = cv2.addWeighted(pcm_rgb, 0.4, heatmap_color, 0.6, 0)
+            
+            ax.imshow(overlay)
+            ax.set_title(layer_name)
+            ax.axis('off')
+
+            # add colorbar
+            cbar = plt.colorbar(plt.cm.ScalarMappable(cmap='jet'), ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label('Grad-CAM Intensity', rotation=270, labelpad=15)
+
+        # Generated H&E
+        gen_img_np = generated_img.squeeze().cpu().numpy()
+        gen_img_np = np.transpose(gen_img_np, (1, 2, 0))
+        # Denormalize if your output is [-1, 1]
+        gen_img_np = (gen_img_np * 0.5) + 0.5 
+        axes[-1].imshow(gen_img_np)
+        axes[-1].set_title("Generated H&E")
+        axes[-1].axis('off')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f"spaghetti_image_{f_name}_gradcam_{i}.png"))
+        plt.close()
+
+        # save the images
+        output_path = os.path.join(output_dir, f"pink_image_{f_name}.png")
+        v2.ToPILImage()(pink_image.squeeze(0)).save(output_path)
+        original_output_path = os.path.join(output_dir, f"spaghetti_image_{f_name}_original.png")
+        v2.ToPILImage()(image.squeeze(0)).save(original_output_path)
+        spaghetti_output_path = os.path.join(output_dir, f"spaghetti_image_{f_name}.png")
+        v2.ToPILImage()(spaghetti_image.squeeze(0)).save(spaghetti_output_path)
+        recon_output_path = os.path.join(output_dir, f"spaghetti_image_{f_name}_recon.png")
+        v2.ToPILImage()(recon.squeeze(0)).save(recon_output_path)
 
 def main():
     parser = argparse.ArgumentParser(description='Generate pink filter images from the original images in a given directory.')
