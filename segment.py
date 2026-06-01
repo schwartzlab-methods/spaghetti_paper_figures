@@ -88,6 +88,31 @@ def cellpose_he(img, model, min_size=10, flow_threshold=4.0,
     print(f"Number of segments: {len(np.unique(res))}")
     return res
 
+def deepsea(img, model):
+    # get original size
+    img_size = img.shape[0]
+    if np.max(img) < 1:
+        img = (img * 255).astype(np.uint8)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # ensure 1 channel only
+    if len(img.shape) == 3 and img.shape[2] > 1:
+        img = np.mean(img, axis=2, keepdims=True).astype(np.uint8)
+    img = (255 * ((img - img.min()) / (np.ptp(img) + 1e-8))).astype(np.uint8)
+    test_transforms = transforms.Compose([
+                               transforms.ToPILImage(),
+                               transforms.Resize((383,512)),
+                               transforms.ToTensor(),
+                               transforms.Normalize(mean = [0.5],
+                                                    std = [0.5])
+                           ])
+    tensor_img=test_transforms(img).to(device=device, dtype=torch.float32)
+    mask_pred, edge_pred = model(tensor_img.unsqueeze(0))
+    mask_pred = mask_pred.argmax(dim=1).cpu().numpy()
+    label_img, _ = ndi.label(remove_small_objects(mask_pred[0, :, :] > 0, min_size=20, connectivity=1))
+    # resize
+    out = np.resize(label_img, (img_size, img_size))
+    return out
+
 def segment_watershed(image: np.ndarray, if_mic: bool) -> np.ndarray:
     '''
     Segment using Watershed method
